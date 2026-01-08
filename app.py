@@ -7,7 +7,17 @@ import pickle
 import os
 import cv2
 import io
+import time
 from batik_embedder import BatikEmbedder
+
+# Firebase / GCS Imports for Dynamic Sync
+try:
+    from google.cloud import storage
+    from google.oauth2 import service_account
+    GCS_AVAILABLE = True
+except ImportError:
+    GCS_AVAILABLE = False
+    print("Warning: google-cloud-storage not installed. Dynamic sync disabled.")
 
 # Import utilities from main if needed, or re-implement
 def cosine_similarity(v1, v2):
@@ -93,16 +103,46 @@ embedder = None
 INDEX_FILE = "batik_index.pkl"
 FB_INDEX_FILE = "batik_index_fb.pkl"
 BUCKET_NAME = "gooproper-aplikasi" # Hardcoded from user context
+TARGET_INDEX_NAME = "batik_index_fb.pkl" # Name in Bucket
+LOCAL_INDEX_PATH = "batik_index_fb.pkl"
+
+
+def download_index_from_gcs():
+    """Downloads the latest index file from Firebase Storage (GCS)."""
+    if not GCS_AVAILABLE:
+        return False
+        
+    try:
+        print(f"Attempting to download {TARGET_INDEX_NAME} from {BUCKET_NAME}...")
+        # Use ADC by default
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob(TARGET_INDEX_NAME)
+        
+        if blob.exists():
+            blob.download_to_filename(LOCAL_INDEX_PATH)
+            print(f"Successfully downloaded {LOCAL_INDEX_PATH}")
+            return True
+        else:
+            print(f"Index file {TARGET_INDEX_NAME} not found in bucket.")
+            return False
+            
+    except Exception as e:
+        print(f"Failed to download index from GCS: {e}")
+        return False
 
 @app.on_event("startup")
 async def load_resources():
-    global index_data, embedder, INDEX_FILE
+    global index_data, embedder
     
     # Initialize Embedder
     print("Initializing BatikEmbedder...")
     embedder = BatikEmbedder(use_cuda=False)
     
-    # Prioritize Firebase Index if exists
+    # 1. Try to download latest index from Cloud Storage
+    download_index_from_gcs()
+    
+    # 2. Load the index (Priority: FB Index -> Local Index)
     if os.path.exists(FB_INDEX_FILE):
         print(f"Loading Firebase index from {FB_INDEX_FILE}...")
         with open(FB_INDEX_FILE, 'rb') as f:
@@ -115,6 +155,32 @@ async def load_resources():
         print(f"Loaded {len(index_data)} items locally.")
     else:
         print(f"Warning: No index file found. Search will be empty.")
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint for Cloud Run."""
+    if embedder is None:
+        raise HTTPException(status_code=503, detail="Embedder not ready")
+    return {"status": "ok", "index_size": len(index_data)}
+
+@app.post("/api/sync")
+async def sync_index():
+    """
+    Manually triggers an index download from Storage and reloads it.
+    Useful if you uploaded new images and re-indexed (and uploaded the new pkl) separately.
+    """
+    global index_data
+    success = download_index_from_gcs()
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to download index")
+        
+    # Reload
+    if os.path.exists(LOCAL_INDEX_PATH):
+        with open(LOCAL_INDEX_PATH, 'rb') as f:
+            index_data = pickle.load(f)
+        return {"status": "synced", "items": len(index_data)}
+    else:
+         raise HTTPException(status_code=404, detail="Index file not found after download attempt")
 
 @app.post("/api/search")
 async def search_image(file: UploadFile = File(...)):
@@ -179,6 +245,10 @@ async def search_image(file: UploadFile = File(...)):
                     orb_score = 0.0
                     local_path = os.path.join("static/images", filename)
                     # Run ORB on everything plausible
+                    # WARNING: In Cloud Run, static/images might be empty or partial if we rely on dynamic download.
+                    # ORB verification requires the LOCAL FILE. 
+                    # If we don't have the file, we skip ORB or download it on demand (too slow).
+                    # For now, we only run ORB if file exists.
                     if vector_score > 0.1 and os.path.exists(local_path):
                         orb_score = orb_verify(contents, local_path)
                     
@@ -195,7 +265,13 @@ async def search_image(file: UploadFile = File(...)):
                     else:
                         # No geometric confirmation -> REJECT COMPLETELY (0%)
                         # "Mirip Dikit" (Just similar) is not accepted.
-                        final_score = 0.0
+                        # IF file didn't exist (Cloud Run case), we might be too harsh here.
+                        # Fallback: If file missing, trust vector score but cap it?
+                        if not os.path.exists(local_path):
+                             # If we can't verify, we trust the vector but be conservative
+                             final_score = vector_score
+                        else:
+                             final_score = 0.0
                     
                     final_score = final_score * 100
                     raw_debug = raw_score
@@ -235,9 +311,6 @@ async def search_image(file: UploadFile = File(...)):
 
 # Serve Static Files (Frontend)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
-# Optional: Mount a directory to serve local images if they are local files
-# WARNING: This exposes the directory. For dev only.
-# app.mount("/images", StaticFiles(directory="/path/to/local/images"), name="images")
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=8080, reload=True)

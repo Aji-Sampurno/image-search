@@ -63,12 +63,15 @@ def cmd_index_firebase(args):
         print("Error: firebase-admin module not installed. Run 'pip install firebase-admin'.")
         return
 
-    if not os.path.exists(args.cred_file):
-        print(f"Error: Credential file '{args.cred_file}' not found.")
-        return
+    print(f"Initializing Firebase...")
+    
+    # Check for ADC first or specific file
+    if args.cred_file and os.path.exists(args.cred_file):
+        cred = credentials.Certificate(args.cred_file)
+    else:
+        print("Using Application Default Credentials (ADC)...")
+        cred = credentials.ApplicationDefault()
 
-    print(f"Initializing Firebase with {args.cred_file}...")
-    cred = credentials.Certificate(args.cred_file)
     try:
         firebase_admin.initialize_app(cred, {
             'storageBucket': args.bucket_name
@@ -211,7 +214,7 @@ def main():
     # Firebase Index Command
     parser_fb = subparsers.add_parser("index-firebase", help="Index images from Firebase Storage")
     parser_fb.add_argument("bucket_name", help="Firebase Storage Bucket Name (e.g. 'my-app.appspot.com')")
-    parser_fb.add_argument("cred_file", help="Path to Firebase Service Account JSON")
+    parser_fb.add_argument("--cred_file", default=None, help="Path to Firebase Service Account JSON (Optional if using ADC)")
     parser_fb.add_argument("--output_index", default="batik_index_fb.pkl", help="Output path for the index file")
     parser_fb.add_argument("--device", default="cpu", help="Device (cpu/cuda)")
 

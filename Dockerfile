@@ -11,6 +11,10 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# Environment Variables
+ENV HF_HOME=/app/model_cache
+ENV PYTHONUNBUFFERED=1
+
 # Install PyTorch CPU version specifically to reduce image size (Cloud Run runs on CPU)
 # We do this before requirements.txt to ensure the CPU version is used
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu

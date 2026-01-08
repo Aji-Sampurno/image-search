@@ -12,3 +12,5 @@ requests
 fastapi
 uvicorn
 python-multipart
+google-cloud-storage
+google-auth

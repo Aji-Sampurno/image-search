@@ -50,4 +50,4 @@ jobs:
           # CPU and Memory configuration:
           # 2Gi Memory and 2 CPUs suggested for ML inference usage
           # --allow-unauthenticated enables public access
-          flags: '--allow-unauthenticated --memory=2Gi --cpu=2'
+          flags: '--allow-unauthenticated --memory=2Gi --cpu=2 --timeout=300'
