@@ -1,0 +1,38 @@
+steps:
+  # 1. Build the Docker image using Dockerfile optimizations
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'build', 
+      '-t', 'asia-southeast1-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/image-search/image-search:${COMMIT_SHA}', 
+      '.'
+    ]
+
+  # 2. Push the image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'push', 
+      'asia-southeast1-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/image-search/image-search:${COMMIT_SHA}'
+    ]
+
+  # 3. Deploy to Cloud Run with 4Gi RAM
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'image-search'
+      - '--image'
+      - 'asia-southeast1-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/image-search/image-search:${COMMIT_SHA}'
+      - '--region'
+      - 'asia-southeast1'
+      - '--allow-unauthenticated'
+      - '--memory'
+      - '4Gi'
+      - '--cpu'
+      - '2'
+      - '--timeout'
+      - '300'
+
+# Use a high-end machine to avoid OOM during image export
+options:
+  machineType: 'E2_HIGHCPU_8'
