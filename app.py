@@ -100,16 +100,18 @@ import urllib.parse
 # Global variables
 index_data = {}
 embedder = None
+is_ready = False  # Track if models/index are loaded
 INDEX_FILE = "batik_index.pkl"
 FB_INDEX_FILE = "batik_index_fb.pkl"
-BUCKET_NAME = "gooproper-aplikasi" # Hardcoded from user context
-TARGET_INDEX_NAME = "batik_index_fb.pkl" # Name in Bucket
+BUCKET_NAME = "gooproper-aplikasi" 
+TARGET_INDEX_NAME = "batik_index_fb.pkl"
 LOCAL_INDEX_PATH = "batik_index_fb.pkl"
 
 
 def download_index_from_gcs():
     """Downloads the latest index file from Firebase Storage (GCS)."""
     if not GCS_AVAILABLE:
+        print("GCS not available, skipping download.")
         return False
         
     try:
@@ -131,37 +133,52 @@ def download_index_from_gcs():
         print(f"Failed to download index from GCS: {e}")
         return False
 
+import asyncio
+
+async def load_resources_async():
+    """Non-blocking loader for heavy resources."""
+    global index_data, embedder, is_ready
+    try:
+        print("Background: Initializing BatikEmbedder...")
+        # Initialize Embedder (This takes time/RAM)
+        embedder = BatikEmbedder(use_cuda=False)
+        
+        # 1. Try to download latest index from Cloud Storage
+        download_index_from_gcs()
+        
+        # 2. Load the index (Priority: FB Index -> Local Index)
+        if os.path.exists(FB_INDEX_FILE):
+            print(f"Background: Loading Firebase index from {FB_INDEX_FILE}...")
+            with open(FB_INDEX_FILE, 'rb') as f:
+                index_data = pickle.load(f)
+            print(f"Background: Loaded {len(index_data)} items.")
+        elif os.path.exists(INDEX_FILE):
+            print(f"Background: Loading local index from {INDEX_FILE}...")
+            with open(INDEX_FILE, 'rb') as f:
+                index_data = pickle.load(f)
+            print(f"Background: Loaded {len(index_data)} items.")
+        else:
+            print(f"Background: Warning - No index file found.")
+        
+        is_ready = True
+        print("Background: System is READY.")
+    except Exception as e:
+        print(f"Background: CRITICAL ERROR during loading: {e}")
+
 @app.on_event("startup")
-async def load_resources():
-    global index_data, embedder
-    
-    # Initialize Embedder
-    print("Initializing BatikEmbedder...")
-    embedder = BatikEmbedder(use_cuda=False)
-    
-    # 1. Try to download latest index from Cloud Storage
-    download_index_from_gcs()
-    
-    # 2. Load the index (Priority: FB Index -> Local Index)
-    if os.path.exists(FB_INDEX_FILE):
-        print(f"Loading Firebase index from {FB_INDEX_FILE}...")
-        with open(FB_INDEX_FILE, 'rb') as f:
-            index_data = pickle.load(f)
-        print(f"Loaded {len(index_data)} items from Firebase.")
-    elif os.path.exists(INDEX_FILE):
-        print(f"Loading local index from {INDEX_FILE}...")
-        with open(INDEX_FILE, 'rb') as f:
-            index_data = pickle.load(f)
-        print(f"Loaded {len(index_data)} items locally.")
-    else:
-        print(f"Warning: No index file found. Search will be empty.")
+async def startup_event():
+    # Start the loading in the background
+    asyncio.create_task(load_resources_async())
+    print("Startup: Server starting immediately. Models loading in background...")
 
 @app.get("/health")
 def health_check():
     """Health check endpoint for Cloud Run."""
-    if embedder is None:
-        raise HTTPException(status_code=503, detail="Embedder not ready")
-    return {"status": "ok", "index_size": len(index_data)}
+    return {
+        "status": "ok" if is_ready else "loading",
+        "is_ready": is_ready,
+        "index_size": len(index_data)
+    }
 
 @app.post("/api/sync")
 async def sync_index():
@@ -184,8 +201,8 @@ async def sync_index():
 
 @app.post("/api/search")
 async def search_image(file: UploadFile = File(...)):
-    if not embedder:
-        raise HTTPException(status_code=500, detail="Embedder not initialized")
+    if not is_ready or not embedder:
+        raise HTTPException(status_code=503, detail="System is still loading models/index. Please try again in a few seconds.")
     
     try:
         contents = await file.read()
@@ -310,6 +327,8 @@ async def search_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # Serve Static Files (Frontend)
+if not os.path.exists("static"):
+    os.makedirs("static")
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
