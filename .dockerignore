@@ -1,0 +1,33 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.gitignore
+.mypy_cache
+.pytest_cache
+.hypothesize
+
+# Secrets - CRITICAL
+serviceAccountKey.json
+.env
+
+# Local development files
+README.md
+implementation_plan.md
+task.md
+walkthrough.md
