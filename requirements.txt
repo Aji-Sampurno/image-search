@@ -1,0 +1,14 @@
+torch
+torchvision
+transformers
+opencv-python-headless
+scikit-image
+numpy
+pillow
+scipy
+scikit-learn
+firebase-admin
+requests
+fastapi
+uvicorn
+python-multipart
