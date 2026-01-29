@@ -6,13 +6,7 @@ import pickle
 import time
 from batik_embedder import BatikEmbedder
 
-# Optional imports for Firebase
-try:
-    import firebase_admin
-    from firebase_admin import credentials, storage
-    FIREBASE_AVAILABLE = True
-except ImportError:
-    FIREBASE_AVAILABLE = False
+
 
 def cosine_similarity(v1, v2):
     return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
@@ -58,81 +52,7 @@ def cmd_index(args):
         pickle.dump(index_data, f)
     print(f"Index saved to {args.output_index} ({len(index_data)} items).")
 
-def cmd_index_firebase(args):
-    if not FIREBASE_AVAILABLE:
-        print("Error: firebase-admin module not installed. Run 'pip install firebase-admin'.")
-        return
 
-    print(f"Initializing Firebase...")
-    
-    # Check for ADC first or specific file
-    if args.cred_file and os.path.exists(args.cred_file):
-        cred = credentials.Certificate(args.cred_file)
-    else:
-        print("Using Application Default Credentials (ADC)...")
-        cred = credentials.ApplicationDefault()
-
-    try:
-        firebase_admin.initialize_app(cred, {
-            'storageBucket': args.bucket_name
-        })
-    except ValueError:
-        # App might already be initialized
-        pass
-
-    bucket = storage.bucket()
-    print(f"Connected to bucket: {args.bucket_name}")
-    print("Listing blobs (this might take a moment)...")
-    blobs = list(bucket.list_blobs())
-    print(f"Found {len(blobs)} objects.")
-
-    print(f"Initializing Embedder on {args.device}...")
-    embedder = BatikEmbedder(use_cuda=(args.device != "cpu"))
-    
-    index_data = {}
-    valid_exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
-    
-    start_time = time.time()
-    for idx, blob in enumerate(blobs):
-        # Filter extensions
-        ext = os.path.splitext(blob.name)[1].lower()
-        if ext not in valid_exts:
-            continue
-
-        print(f"[{idx+1}/{len(blobs)}] Downloading {blob.name}...", end="\r")
-        
-        try:
-            # Download as bytes
-            image_bytes = blob.download_as_bytes()
-            
-            # Save locally for ORB verification in app.py
-            local_filename = os.path.join("static/images", blob.name)
-            # Ensure subdir exists if blob has folders
-            os.makedirs(os.path.dirname(local_filename), exist_ok=True)
-            with open(local_filename, "wb") as f_img:
-                f_img.write(image_bytes)
-            
-            # Generate embedding from bytes
-            res = embedder.generate_embedding(image_source=image_bytes, from_bytes=True)
-            
-            if res["status"] == "success":
-                # Store public URL or gs:// path as the key
-                # Using generation to cache bust if needed, or just media link
-                # For simplicity, store the blob name or a constructable URL
-                # We store the blob NAME as key, app.py will look in static/images
-                index_data[blob.name] = res["vector"]
-            else:
-                print(f"\nFailed to process {blob.name}: {res['message']}")
-                
-        except Exception as e:
-            print(f"\nError downloading/processing {blob.name}: {e}")
-
-    total_time = time.time() - start_time
-    print(f"\nCompleted in {total_time:.2f}s.")
-    
-    with open(args.output_index, 'wb') as f:
-        pickle.dump(index_data, f)
-    print(f"Index saved to {args.output_index} ({len(index_data)} items).")
 
 def cmd_search(args):
     if not os.path.exists(args.index_file):
@@ -157,7 +77,7 @@ def cmd_search(args):
     # Compute similarities
     results = []
     for path, vec in index_data.items():
-        score = cosine_similarity(query_vec, vec)
+        score = cosine_similarity(query_vec["structure"], vec["structure"])
         results.append((path, score))
         
     # Sort descending
@@ -185,7 +105,7 @@ def cmd_compare(args):
             print(f"Error: {res['message']}")
             return
 
-    score = cosine_similarity(embeddings[0], embeddings[1])
+    score = cosine_similarity(embeddings[0]["structure"], embeddings[1]["structure"])
     print(f"\nSimilarity: {score:.4f}")
 
 def main():
@@ -211,19 +131,13 @@ def main():
     parser_compare.add_argument("image2", help="Path to second image")
     parser_compare.add_argument("--device", default="cpu", help="Device (cpu/cuda)")
 
-    # Firebase Index Command
-    parser_fb = subparsers.add_parser("index-firebase", help="Index images from Firebase Storage")
-    parser_fb.add_argument("bucket_name", help="Firebase Storage Bucket Name (e.g. 'my-app.appspot.com')")
-    parser_fb.add_argument("--cred_file", default=None, help="Path to Firebase Service Account JSON (Optional if using ADC)")
-    parser_fb.add_argument("--output_index", default="batik_index_fb.pkl", help="Output path for the index file")
-    parser_fb.add_argument("--device", default="cpu", help="Device (cpu/cuda)")
+
 
     args = parser.parse_args()
     
     if args.command == "index":
         cmd_index(args)
-    elif args.command == "index-firebase":
-        cmd_index_firebase(args)
+
     elif args.command == "search":
         cmd_search(args)
     elif args.command == "compare":

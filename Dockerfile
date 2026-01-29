@@ -26,12 +26,12 @@ COPY requirements.txt .
 # (Pip will detect torch is already installed and skip it if version matches)
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the DINOv2 model to bake it into the image.
-# This prevents downloading it on every Cloud Run cold start (which causes timeouts).
-RUN python -c "from transformers import AutoImageProcessor, AutoModel; \
-    model_name = 'facebook/dinov2-small'; \
-    AutoImageProcessor.from_pretrained(model_name); \
-    AutoModel.from_pretrained(model_name)"
+# Pre-download the ResNet50 model to bake it into the image.
+# This prevents downloading it on every Cloud Run cold start.
+RUN python -c "from torchvision import models; \
+    import torch; \
+    from torch.hub import load_state_dict_from_url; \
+    models.resnet50(weights=models.ResNet50_Weights.DEFAULT)"
 
 # Copy the rest of the application code
 # This will copy app.py, batik_embedder.py, main.py, pickle files, and static/ folder

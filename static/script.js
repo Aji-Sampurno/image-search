@@ -1,17 +1,34 @@
 const uploadArea = document.getElementById('upload-area');
-const fileInput = document.getElementById('file-input');
 const uploadBox = document.querySelector('.upload-box');
+const fileInput = document.getElementById('file-input');
+const cameraInput = document.getElementById('camera-input');
+const browseBtn = document.getElementById('browse-btn');
+const cameraBtn = document.getElementById('camera-btn');
 const previewContainer = document.getElementById('preview-container');
 const previewImage = document.getElementById('preview-image');
 const clearBtn = document.getElementById('clear-btn');
-const resultsGrid = document.getElementById('results-grid');
 const loader = document.getElementById('loader');
+const resultsGrid = document.getElementById('results-grid');
 
 // Event Listeners
+browseBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    fileInput.click();
+});
+
+cameraBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    cameraInput.click();
+});
+
 uploadBox.addEventListener('click', () => fileInput.click());
 clearBtn.addEventListener('click', clearSelection);
 
 fileInput.addEventListener('change', (e) => {
+    if (e.target.files.length > 0) handleFile(e.target.files[0]);
+});
+
+cameraInput.addEventListener('change', (e) => {
     if (e.target.files.length > 0) handleFile(e.target.files[0]);
 });
 

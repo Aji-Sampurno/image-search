@@ -1,0 +1,14 @@
+services:
+  batik-search:
+    build: .
+    image: batik-search:latest
+    container_name: batik-search-app
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./static/images:/app/static/images
+      - ./data:/app/data
+    environment:
+      - PORT=8080
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped

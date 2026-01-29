@@ -30,7 +30,18 @@
                 </div>
                 <h3>Upload Batik Image</h3>
                 <p>Drag & drop or click to browse</p>
+                <div class="upload-buttons">
+                    <button class="btn-primary" id="browse-btn">Open Gallery</button>
+                    <button class="btn-secondary" id="camera-btn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                            <circle cx="12" cy="13" r="4"/>
+                        </svg>
+                        Take Photo
+                    </button>
+                </div>
                 <input type="file" id="file-input" accept="image/*" hidden>
+                <input type="file" id="camera-input" accept="image/*" capture="environment" hidden>
             </div>
             <div id="preview-container" class="preview-container hidden">
                 <img id="preview-image" src="" alt="Query Preview">

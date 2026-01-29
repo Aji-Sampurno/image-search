@@ -64,6 +64,7 @@ h1 {
     margin-bottom: 0.5rem;
     background: linear-gradient(135deg, #fff 0%, #aaa 100%);
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 
@@ -89,7 +90,8 @@ h1 {
     backdrop-filter: blur(10px);
 }
 
-.upload-box:hover, .upload-box.dragover {
+.upload-box:hover,
+.upload-box.dragover {
     border-color: var(--gold);
     background: rgba(212, 175, 55, 0.05);
 }
@@ -107,6 +109,50 @@ h1 {
 .upload-box p {
     color: var(--text-secondary);
     font-size: 0.9rem;
+    margin-bottom: 2rem;
+}
+
+.upload-buttons {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.btn-primary,
+.btn-secondary {
+    padding: 0.8rem 1.5rem;
+    border-radius: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--font-body);
+}
+
+.btn-primary {
+    background: var(--gold);
+    color: black;
+    border: none;
+}
+
+.btn-primary:hover {
+    background: #e5c35b;
+    transform: translateY(-2px);
+}
+
+.btn-secondary {
+    background: rgba(255, 255, 255, 0.05);
+    color: white;
+    border: 1px solid var(--card-border);
+}
+
+.btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: var(--gold);
+    transform: translateY(-2px);
 }
 
 .preview-container {
@@ -115,7 +161,7 @@ h1 {
     margin: 0 auto;
     border-radius: 12px;
     overflow: hidden;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
 }
 
 .preview-container img {
@@ -127,7 +173,7 @@ h1 {
     position: absolute;
     top: 10px;
     right: 10px;
-    background: rgba(0,0,0,0.6);
+    background: rgba(0, 0, 0, 0.6);
     border: none;
     color: white;
     width: 30px;
@@ -142,7 +188,7 @@ h1 {
 }
 
 .close-btn:hover {
-    background: rgba(0,0,0,0.8);
+    background: rgba(0, 0, 0, 0.8);
 }
 
 .hidden {
@@ -181,7 +227,7 @@ h1 {
 
 .card:hover {
     transform: translateY(-5px);
-    box-shadow: 0 10px 20px rgba(0,0,0,0.3);
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
     border-color: rgba(212, 175, 55, 0.3);
 }
 
@@ -208,16 +254,24 @@ h1 {
 
 .card-title {
     font-size: 0.9rem;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    word-break: break-all;
+    word-wrap: break-word;
+    /* Ensure wrapping */
+    white-space: normal !important;
+    /* Force normal whitespace */
+    overflow: visible !important;
+    /* Force visible overflow */
+    text-overflow: clip !important;
+    /* Disable ellipsis */
     margin-bottom: 0.5rem;
     color: var(--text-primary);
+    line-height: 1.3;
+    /* Improve readability for wrapped text */
 }
 
 .similarity-bar-bg {
     height: 4px;
-    background: rgba(255,255,255,0.1);
+    background: rgba(255, 255, 255, 0.1);
     border-radius: 2px;
     margin-bottom: 0.5rem;
     overflow: hidden;
@@ -252,9 +306,13 @@ h1 {
 }
 
 @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 @media (max-width: 768px) {
-    h1 { font-size: 2.5rem; }
+    h1 {
+        font-size: 2.5rem;
+    }
 }

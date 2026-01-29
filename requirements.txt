@@ -7,10 +7,8 @@ numpy
 pillow
 scipy
 scikit-learn
-firebase-admin
 requests
 fastapi
 uvicorn
 python-multipart
-google-cloud-storage
-google-auth
+faiss-cpu

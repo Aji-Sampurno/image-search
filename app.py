@@ -1,330 +1,278 @@
+import os
+# FORCE OpenMP COMPATIBILITY FOR MACOS
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import uvicorn
 import numpy as np
 import pickle
 import os
-import cv2
-import io
 import time
-from batik_embedder import BatikEmbedder
+import io
+from PIL import Image
+# Import Embedder (Torch) BEFORE FAISS to prevent OpenMP Segfault on Mac
+from embedder import CNNEmbedder
+import faiss
+import cv2 # Import OpenCV - Must be AFTER Torch/Embedder
 
-# Firebase / GCS Imports for Dynamic Sync
-try:
-    from google.cloud import storage
-    from google.oauth2 import service_account
-    GCS_AVAILABLE = True
-except ImportError:
-    GCS_AVAILABLE = False
-    print("Warning: google-cloud-storage not installed. Dynamic sync disabled.")
-
-# Import utilities from main if needed, or re-implement
-def cosine_similarity(v1, v2):
-    return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-
-def orb_verify(query_bytes, candidate_path):
-    """
-    Performs geometric verification using ORB feature matching.
-    Returns a verification score (0.0 to 1.0).
-    """
+# --- SIFT Helper ---
+def get_sift_score(query_img_cv, target_path):
     try:
-        # Decode Query
-        nparr = np.frombuffer(query_bytes, np.uint8)
-        img1 = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        # Read target as Grayscale directly to save memory
+        target_img = cv2.imread(target_path, cv2.IMREAD_GRAYSCALE)
+        if target_img is None: return 0
         
-        # Load Candidate
-        img2 = cv2.imread(candidate_path, cv2.IMREAD_GRAYSCALE)
-        if img2 is None: return 0.0
-
-        # CROP TO CENTER 50% (Remove Collar/Buttons/Sleeves)
-        # This forces ORB to match the PATTERN, not the SHIRT.
-        def crop_center(img):
+        # Convert Query (RGB/BGR) to Gray if needed
+        if len(query_img_cv.shape) == 3:
+            query_gray = cv2.cvtColor(query_img_cv, cv2.COLOR_BGR2GRAY)
+        else:
+            query_gray = query_img_cv
+            
+        # Resize for speed (limit max dim to 800)
+        def resize_if_big(img):
             h, w = img.shape
-            cy, cx = h // 2, w // 2
-            # Crop 50%
-            dy, dx = h // 4, w // 4
-            return img[cy-dy:cy+dy, cx-dx:cx+dx]
+            if max(h, w) > 800:
+                scale = 800.0 / max(h, w)
+                return cv2.resize(img, (0,0), fx=scale, fy=scale)
+            return img
+            
+        query_gray = resize_if_big(query_gray)
+        target_img = resize_if_big(target_img)
 
-        img1 = crop_center(img1)
-        img2 = crop_center(img2)
-
-        # ORB Detector
-        orb = cv2.ORB_create(nfeatures=500)
-        kp1, des1 = orb.detectAndCompute(img1, None)
-        kp2, des2 = orb.detectAndCompute(img2, None)
-
-        if des1 is None or des2 is None: return 0.0
-
-        # Matcher with k-NN (k=2) for Ratio Test
-        # This is CRITICAL for repetitive textures (like batik) to avoid false positives.
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False) # CrossCheck OFF for kNN
-        try:
-            matches = bf.knnMatch(des1, des2, k=2)
-        except Exception:
-            return 0.0
+        # Detect SIFT
+        sift = cv2.SIFT_create()
+        kp1, des1 = sift.detectAndCompute(query_gray, None)
+        kp2, des2 = sift.detectAndCompute(target_img, None)
         
-        # Apply Lowe's Ratio Test
-        # If the best match isn't significantly better than the second best, it's ambiguous (noise).
-        good_matches = []
+        if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
+            return 0
+            
+        # FLANN Matcher
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        flann = cv2.FlannBasedMatcher(index_params, search_params)
+        matches = flann.knnMatch(des1, des2, k=2)
+        
+        # Lowe's Ratio Test
+        good_matches = 0
         for m, n in matches:
             if m.distance < 0.75 * n.distance:
-                good_matches.append(m)
+                good_matches += 1
+                
+        return good_matches
+    except Exception as e:
+        print(f"SIFT Error on {target_path}: {e}")
+        return 0
+# -------------------
+
+# --- Color Helper ---
+def calc_color_score(img1_cv, img2_path, is_query=False):
+    try:
+        # Read target
+        img2_cv = cv2.imread(img2_path)
+        if img2_cv is None: return 0.0
         
-        count = len(good_matches)
+        # Center Crop if it is the query (to focus on object, ignore background)
+        if is_query:
+            h, w, _ = img1_cv.shape
+            cy, cx = h // 2, w // 2
+            ch, cw = h // 2, w // 2 # 50% crop
+            img1_cv = img1_cv[cy - ch//2 : cy + ch//2, cx - cw//2 : cx + cw//2]
         
-        # Scoring Logic with Stricter Requirements
-        # We need a decent number of UNIQUE, GOOD matches.
-        if count < 8: return 0.0 # Strict floor
-        if count > 40: return 1.0
-        return (count - 8) / 32.0
+        # Convert to HSV
+        hsv1 = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2HSV)
+        hsv2 = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2HSV)
+        
+        # Compute Histograms (Hue: 30 bins, Saturation: 32 bins)
+        h_bins = 30
+        s_bins = 32
+        histSize = [h_bins, s_bins]
+        ranges = [0, 180, 0, 256] 
+        channels = [0, 1]
+        
+        hist1 = cv2.calcHist([hsv1], channels, None, histSize, ranges, accumulate=False)
+        cv2.normalize(hist1, hist1, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+        
+        hist2 = cv2.calcHist([hsv2], channels, None, histSize, ranges, accumulate=False)
+        cv2.normalize(hist2, hist2, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+        
+        score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+        return max(0.0, score)
         
     except Exception as e:
-        print(f"ORB Error: {e}")
+        print(f"Color Hist Error: {e}")
         return 0.0
 
-app = FastAPI(title="Batik Search Engine")
+# -------------------
+
+# Configuration
+# Configuration
+# Use Absolute Path based on this file's location to avoid CWD issues in Passenger
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+
+VECTORS_FILE = os.path.join(DATA_DIR, "batik_vectors.npy")
+PATHS_FILE = os.path.join(DATA_DIR, "batik_paths.pkl")
+INDEX_FILE = os.path.join(DATA_DIR, "batik.faiss")
+IMAGES_DIR = os.path.join(BASE_DIR, "static/images")
+
+app = FastAPI(title="Batik Search Engine (CNN + FAISS)")
 
 from fastapi.middleware.cors import CORSMiddleware
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (external websites)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-import urllib.parse
-
-# Global variables
-index_data = {}
+# Global Resources
 embedder = None
-is_ready = False  # Track if models/index are loaded
-INDEX_FILE = "batik_index.pkl"
-FB_INDEX_FILE = "batik_index_fb.pkl"
-BUCKET_NAME = "gooproper-aplikasi" 
-TARGET_INDEX_NAME = "batik_index_fb.pkl"
-LOCAL_INDEX_PATH = "batik_index_fb.pkl"
-
-
-def download_index_from_gcs():
-    """Downloads the latest index file from Firebase Storage (GCS)."""
-    if not GCS_AVAILABLE:
-        print("GCS not available, skipping download.")
-        return False
-        
-    try:
-        print(f"Attempting to download {TARGET_INDEX_NAME} from {BUCKET_NAME}...")
-        # Use ADC by default
-        storage_client = storage.Client()
-        bucket = storage_client.bucket(BUCKET_NAME)
-        blob = bucket.blob(TARGET_INDEX_NAME)
-        
-        if blob.exists():
-            blob.download_to_filename(LOCAL_INDEX_PATH)
-            print(f"Successfully downloaded {LOCAL_INDEX_PATH}")
-            return True
-        else:
-            print(f"Index file {TARGET_INDEX_NAME} not found in bucket.")
-            return False
-            
-    except Exception as e:
-        print(f"Failed to download index from GCS: {e}")
-        return False
-
-import asyncio
-
-async def load_resources_async():
-    """Non-blocking loader for heavy resources."""
-    global index_data, embedder, is_ready
-    try:
-        print("Background: Initializing BatikEmbedder...")
-        # Initialize Embedder (This takes time/RAM)
-        embedder = BatikEmbedder(use_cuda=False)
-        
-        # 1. Try to download latest index from Cloud Storage
-        download_index_from_gcs()
-        
-        # 2. Load the index (Priority: FB Index -> Local Index)
-        if os.path.exists(FB_INDEX_FILE):
-            print(f"Background: Loading Firebase index from {FB_INDEX_FILE}...")
-            with open(FB_INDEX_FILE, 'rb') as f:
-                index_data = pickle.load(f)
-            print(f"Background: Loaded {len(index_data)} items.")
-        elif os.path.exists(INDEX_FILE):
-            print(f"Background: Loading local index from {INDEX_FILE}...")
-            with open(INDEX_FILE, 'rb') as f:
-                index_data = pickle.load(f)
-            print(f"Background: Loaded {len(index_data)} items.")
-        else:
-            print(f"Background: Warning - No index file found.")
-        
-        is_ready = True
-        print("Background: System is READY.")
-    except Exception as e:
-        print(f"Background: CRITICAL ERROR during loading: {e}")
+index = None
+image_paths = []
+is_ready = False
 
 @app.on_event("startup")
 async def startup_event():
-    # Start the loading in the background
-    asyncio.create_task(load_resources_async())
-    print("Startup: Server starting immediately. Models loading in background...")
+    global embedder, index, image_paths, is_ready
+    print("Startup: Initializing resources...")
+    
+    try:
+        # 1. Load Embedder
+        embedder = CNNEmbedder()
+        print("Embedder loaded.")
+        
+        # 2. Check for Index
+        if os.path.exists(INDEX_FILE) and os.path.exists(PATHS_FILE):
+            print(f"Loading index from {INDEX_FILE}...")
+            index = faiss.read_index(INDEX_FILE)
+            
+            with open(PATHS_FILE, "rb") as f:
+                image_paths = pickle.load(f)
+                
+            if index.ntotal != len(image_paths):
+                print(f"Warning: Index size ({index.ntotal}) does not match paths count ({len(image_paths)}).")
+            
+            is_ready = True
+            print(f"System READY. Index size: {index.ntotal}")
+        else:
+            print("Warning: Index not found. Please run 'python3 build_index.py' to generate.")
+            is_ready = False
+            
+    except Exception as e:
+        print(f"Critical Startup Error: {e}")
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint for Cloud Run."""
     return {
-        "status": "ok" if is_ready else "loading",
-        "is_ready": is_ready,
-        "index_size": len(index_data)
+        "status": "ok" if is_ready else "not_ready_index_missing",
+        "index_size": index.ntotal if index else 0
     }
-
-@app.post("/api/sync")
-async def sync_index():
-    """
-    Manually triggers an index download from Storage and reloads it.
-    Useful if you uploaded new images and re-indexed (and uploaded the new pkl) separately.
-    """
-    global index_data
-    success = download_index_from_gcs()
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to download index")
-        
-    # Reload
-    if os.path.exists(LOCAL_INDEX_PATH):
-        with open(LOCAL_INDEX_PATH, 'rb') as f:
-            index_data = pickle.load(f)
-        return {"status": "synced", "items": len(index_data)}
-    else:
-         raise HTTPException(status_code=404, detail="Index file not found after download attempt")
 
 @app.post("/api/search")
 async def search_image(file: UploadFile = File(...)):
-    if not is_ready or not embedder:
-        raise HTTPException(status_code=503, detail="System is still loading models/index. Please try again in a few seconds.")
+    global is_ready, index, image_paths
+    
+    if not is_ready or index is None:
+        raise HTTPException(status_code=503, detail="Index not ready. Run build_index.py first.")
     
     try:
+        start_time = time.time()
+        
+        # 1. Read Image
         contents = await file.read()
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        # Generate embedding from bytes
-        res = embedder.generate_embedding(image_source=contents, from_bytes=True)
+        # Prepare CV2 Image for Color Scoring
+        open_cv_query = np.array(image) 
+        open_cv_query = open_cv_query[:, :, ::-1].copy() # RGB to BGR
         
-        if res["status"] == "error":
-            raise HTTPException(status_code=400, detail=res["message"])
+        # 2. Generate Embedding
+        t0 = time.time()
+        query_vector = embedder.encode(image)
+        # FAISS expects (1, D)
+        query_vector = query_vector.reshape(1, -1)
+        t_emb = time.time() - t0
+        
+        # 3. FAISS Search (Retrieval Stage)
+        t1 = time.time()
+        k_retrieval = index.ntotal # Compare against ALL images (Maximum Recall, slower at scale)
+        distances, indices = index.search(query_vector, k_retrieval)
+        t_faiss = time.time() - t1
+        
+        # 4. Hybrid Re-Ranking (Motif + Color)
+        candidates = []
+        
+        print(f"Top 5 Raw FAISS Scores: {distances[0][:5]}")
+
+        for i, idx in enumerate(indices[0]):
+            if idx == -1: continue
+            if idx >= len(image_paths): continue
             
-        q_vecs = res["vector"] # Now a dict: {'structure': ..., 'color': ...}
-        
-        # Compute Similarities with GATING
+            # FAISS Score (Cosine Similarity approx)
+            motif_score = float(distances[0][i])
+            
+            target_path = image_paths[idx]
+            
+            # STRICT PENALTY REMOVED
+            # We just use the weighted average. weak color matches will just have lower scores,
+            # but they won't be eliminated entirely.
+            
+            # Color Score
+            color_score = calc_color_score(open_cv_query, target_path, is_query=True)
+            
+            # Weighted Final Score
+            # Weight: 50% Motif, 50% Color - Balanced Approach
+            final_score = (motif_score * 0.5) + (color_score * 0.5)
+            
+            # Filter out 0 score results early
+            if final_score > 0:
+                candidates.append({
+                    "path": target_path,
+                    "motif_score": motif_score,
+                    "color_score": color_score,
+                    "final_score": final_score
+                })
+            
+        # Sort by Final Score
+        candidates.sort(key=lambda x: x['final_score'], reverse=True)
+            
+        # 5. Format Results
         results = []
-        for filename, db_vecs in index_data.items():
-            # 1. Structure Score (The Gatekeeper)
-            # DINO vectors (normalized)
-            try:
-                # Handle legacy index (if flat array) vs new dict index
-                if isinstance(db_vecs, np.ndarray):
-                    # Legacy fallback (won't work well with Gating, but prevents crash)
-                    # We skip or force re-index
-                    continue 
-
-                score_struct = np.dot(q_vecs["structure"], db_vecs["structure"])
-                
-                # GATE: Lower threshold to 0.45 to account for real-world photo variations
-                if score_struct < 0.45:
-                    final_score = 0.0
-                    raw_debug = score_struct
-                else:
-                    # 2. Compute other scores
-                    score_color = np.dot(q_vecs["color"], db_vecs["color"])
-                    score_texture = np.dot(q_vecs["texture"], db_vecs["texture"])
-                    
-                    # Handle Frequency (Optional for backward compatibility if re-indexing fails)
-                    if "frequency" in q_vecs and "frequency" in db_vecs:
-                        score_freq = np.dot(q_vecs["frequency"], db_vecs["frequency"])
-                    else:
-                        score_freq = score_texture # Fallback
-                    
-                    # weighted combination
-                    # MAXIMIZING TEXTURE/FREQ influence (50%)
-                    # Minimizing Structure (20%)
-                    raw_score = (0.2 * score_struct) + (0.3 * score_color) + (0.25 * score_texture) + (0.25 * score_freq)
-                    
-                    # Calibration
-                    vector_score = max(0.0, min(1.0, (raw_score - 0.45) / 0.50))
-                    
-                    # STRICT COLOR PENALTY:
-                    # Raised threshold to 0.85. 
-                    # Black/Gold vs Orange MUST fail this.
-                    if score_color < 0.82: # Slightly relaxed to 0.82 to be safe for lighting
-                         vector_score *= 0.1 # Nuke it. 0% tolerance for wrong color.
-                    
-                    # 3. ORB Reranking (The Detail Checker)
-                    orb_score = 0.0
-                    local_path = os.path.join("static/images", filename)
-                    # Run ORB on everything plausible
-                    # WARNING: In Cloud Run, static/images might be empty or partial if we rely on dynamic download.
-                    # ORB verification requires the LOCAL FILE. 
-                    # If we don't have the file, we skip ORB or download it on demand (too slow).
-                    # For now, we only run ORB if file exists.
-                    if vector_score > 0.1 and os.path.exists(local_path):
-                        orb_score = orb_verify(contents, local_path)
-                    
-                    # ZERO TOLERANCE POLICY:
-                    # The user requested "Langsung 0" (Straight to 0) if motifs don't match.
-                    # We interpreted this as: If Geometric Verification fails, the score is 0.
-                    
-                    if orb_score > 0.1: 
-                        # Valid geometric match -> Unlocks high scores
-                        # Boost significantly
-                        final_score = 0.8 + (orb_score * 0.2)
-                        # Ensure it's at least as high as the vector score gave
-                        final_score = max(final_score, vector_score)
-                    else:
-                        # No geometric confirmation -> REJECT COMPLETELY (0%)
-                        # "Mirip Dikit" (Just similar) is not accepted.
-                        # IF file didn't exist (Cloud Run case), we might be too harsh here.
-                        # Fallback: If file missing, trust vector score but cap it?
-                        if not os.path.exists(local_path):
-                             # If we can't verify, we trust the vector but be conservative
-                             final_score = vector_score
-                        else:
-                             final_score = 0.0
-                    
-                    final_score = final_score * 100
-                    raw_debug = raw_score
-                
-            except Exception as e:
-                print(f"Error comparing {filename}: {e}")
-                continue
-
-            # Determine URL type
-            if filename.startswith("http"):
-                url = filename
-            elif os.path.exists(filename): 
-                # Absolute local path (fallback)
-                url = f"https://placehold.co/400x400/222/FFF?text={os.path.basename(filename)}"
-            else:
-                # Assume Firebase Blob Name
-                # Construct Public URL
-                safe_name = urllib.parse.quote(filename, safe='')
-                url = f"https://firebasestorage.googleapis.com/v0/b/{BUCKET_NAME}/o/{safe_name}?alt=media"
-
+        for cand in candidates:
+            # Double check (though we filtered above)
+            if cand['final_score'] <= 0: continue
+            
+            path = cand['path']
+            rel_path = os.path.relpath(path, IMAGES_DIR)
+            url = f"/images/{rel_path}"
+            
             results.append({
-                "filename": filename,
-                "score": float(final_score),
-                "raw_score": float(raw_debug), 
-                "url": url
+                "filename": os.path.basename(path),
+                "score": cand['final_score'] * 100,
+                "motif_score": cand['motif_score'] * 100, # Debug info
+                "color_score": cand['color_score'] * 100, # Debug info
+                "url": url,
+                "matches": 0 
             })
             
-        # Sort by score descending
-        results.sort(key=lambda x: x["score"], reverse=True)
+        total_time = time.time() - start_time
+        print(f"Search: {len(results)} results in {total_time:.3f}s (Emb: {t_emb:.3f}s, FAISS: {t_faiss:.3f}s)")
         
-        # Return Top 20
-        return JSONResponse(content={"results": results[:20]})
+        return JSONResponse(content={"results": results})
         
     except Exception as e:
-        print(f"Error processing request: {e}")
+        print(f"Search Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# explicitly serve index.html for root to avoid 404s
+@app.get("/")
+async def read_index():
+    return FileResponse('static/index.html')
 
 # Serve Static Files (Frontend)
 if not os.path.exists("static"):
@@ -332,4 +280,4 @@ if not os.path.exists("static"):
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=8080)
