@@ -46,6 +46,31 @@ Server akan berjalan di `http://localhost:8080`.
 
 ---
 
+## Cara Menjalankan dengan Docker (Recommended)
+
+Jika Anda ingin menjalankan aplikasi tanpa ribet instalasi dependensi, gunakan Docker.
+
+### 1. Jalankan Aplikasi
+Cukup jalankan satu perintah ini:
+
+```bash
+docker-compose up --build
+```
+Aplikasi akan aktif di `http://localhost:8080`.
+*Note: Folder `static/images` dan `data` di-mount dari lokal, jadi gambar baru yang dimasukkan ke folder tersebut akan langsung terbaca setelah restart/reindex.*
+
+### 2. Akses Publik (Ngrok)
+Untuk membuka akses aplikasi ke internet (share link ke orang lain):
+
+1. Pastikan aplikasi Docker sudah berjalan.
+2. Buka terminal baru, jalankan:
+   ```bash
+   ngrok http 8080
+   ```
+3. Salin URL `https://xxxx.ngrok-free.app` yang muncul. URL ini bisa dibuka dari mana saja (HP/Laptop lain).
+
+---
+
 ## Penggunaan API
 
 ### Search Image
