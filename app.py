@@ -12,95 +12,66 @@ import os
 import time
 import io
 from PIL import Image
+
 # Replace Torch Embedder with ONNX Embedder
 from onnx_embedder import ONNXEmbedder
-# Remove faiss import
-import cv2 
+# Remove faiss & cv2
+# import cv2 
 
-# --- SIFT Helper ---
-def get_sift_score(query_img_cv, target_path):
-    try:
-        # Read target as Grayscale directly to save memory
-        target_img = cv2.imread(target_path, cv2.IMREAD_GRAYSCALE)
-        if target_img is None: return 0
-        
-        # Convert Query (RGB/BGR) to Gray if needed
-        if len(query_img_cv.shape) == 3:
-            query_gray = cv2.cvtColor(query_img_cv, cv2.COLOR_BGR2GRAY)
-        else:
-            query_gray = query_img_cv
-            
-        # Resize for speed (limit max dim to 800)
-        def resize_if_big(img):
-            h, w = img.shape
-            if max(h, w) > 800:
-                scale = 800.0 / max(h, w)
-                return cv2.resize(img, (0,0), fx=scale, fy=scale)
-            return img
-            
-        query_gray = resize_if_big(query_gray)
-        target_img = resize_if_big(target_img)
-
-        # Detect SIFT
-        sift = cv2.SIFT_create()
-        kp1, des1 = sift.detectAndCompute(query_gray, None)
-        kp2, des2 = sift.detectAndCompute(target_img, None)
-        
-        if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
-            return 0
-            
-        # FLANN Matcher
-        FLANN_INDEX_KDTREE = 1
-        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-        search_params = dict(checks=50)
-        flann = cv2.FlannBasedMatcher(index_params, search_params)
-        matches = flann.knnMatch(des1, des2, k=2)
-        
-        # Lowe's Ratio Test
-        good_matches = 0
-        for m, n in matches:
-            if m.distance < 0.75 * n.distance:
-                good_matches += 1
-                
-        return good_matches
-    except Exception as e:
-        print(f"SIFT Error on {target_path}: {e}")
-        return 0
-# -------------------
-
-# --- Color Helper ---
-def calc_color_score(img1_cv, img2_path, is_query=False):
+# --- Color Helper (PIL + Numpy implementation) ---
+def calc_color_score_pil(img1_pil, img2_path, is_query=False):
     try:
         # Read target
-        img2_cv = cv2.imread(img2_path)
-        if img2_cv is None: return 0.0
+        if not os.path.exists(img2_path): return 0.0
         
-        # Center Crop if it is the query (to focus on object, ignore background)
+        try:
+            img2_pil = Image.open(img2_path).convert("HSV")
+        except:
+            return 0.0
+
+        # Center Crop if it is the query
         if is_query:
-            h, w, _ = img1_cv.shape
-            cy, cx = h // 2, w // 2
-            ch, cw = h // 2, w // 2 # 50% crop
-            img1_cv = img1_cv[cy - ch//2 : cy + ch//2, cx - cw//2 : cx + cw//2]
+            w, h = img1_pil.size
+            cx, cy = w // 2, h // 2
+            cw, ch = w // 2, h // 2 # 50% crop
+            img1_pil = img1_pil.crop((cx - cw//2, cy - ch//2, cx + cw//2, cy + ch//2))
         
-        # Convert to HSV
-        hsv1 = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2HSV)
-        hsv2 = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2HSV)
+        # Ensure query is HSV
+        if img1_pil.mode != 'HSV':
+            img1_pil = img1_pil.convert("HSV")
+            
+        # Compute Histograms
+        # PIL histogram is a concatenation of histograms for each channel
+        # HSV -> 3 channels * 256 bins = 768 params
+        hist1 = np.array(img1_pil.histogram())
+        hist2 = np.array(img2_pil.histogram())
         
-        # Compute Histograms (Hue: 30 bins, Saturation: 32 bins)
-        h_bins = 30
-        s_bins = 32
-        histSize = [h_bins, s_bins]
-        ranges = [0, 180, 0, 256] 
-        channels = [0, 1]
+        # We only care about Hue (0-255) and Saturation (256-511)
+        # Value (512-767) is less important for color matching
+        hist1 = hist1[:512]
+        hist2 = hist2[:512]
         
-        hist1 = cv2.calcHist([hsv1], channels, None, histSize, ranges, accumulate=False)
-        cv2.normalize(hist1, hist1, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+        # Normalize
+        norm1 = np.linalg.norm(hist1)
+        norm2 = np.linalg.norm(hist2)
         
-        hist2 = cv2.calcHist([hsv2], channels, None, histSize, ranges, accumulate=False)
-        cv2.normalize(hist2, hist2, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+        if norm1 > 0: hist1 = hist1 / norm1
+        if norm2 > 0: hist2 = hist2 / norm2
         
-        score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-        return max(0.0, score)
+        # Correlation
+        # Simple dot product on normalized histograms usually approximates correlation well enough for rankings
+        # Or standard correlation coefficient:
+        
+        m1 = np.mean(hist1)
+        m2 = np.mean(hist2)
+        
+        num = np.sum((hist1 - m1) * (hist2 - m2))
+        den = np.sqrt(np.sum((hist1 - m1)**2)) * np.sqrt(np.sum((hist2 - m2)**2))
+        
+        if den == 0: return 0.0
+        
+        score = num / den
+        return max(0.0, float(score))
         
     except Exception as e:
         print(f"Color Hist Error: {e}")
@@ -109,16 +80,14 @@ def calc_color_score(img1_cv, img2_path, is_query=False):
 # -------------------
 
 # Configuration
-# Use Absolute Path based on this file's location to avoid CWD issues
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
 VECTORS_FILE = os.path.join(DATA_DIR, "batik_vectors.npy")
 PATHS_FILE = os.path.join(DATA_DIR, "batik_paths.pkl")
-# Removed CONFIG/INDEX_FILE since we use pure numpy now
 IMAGES_DIR = os.path.join(BASE_DIR, "static/images")
 
-app = FastAPI(title="Batik Search Engine (ONNX + NumPy)")
+app = FastAPI(title="Batik Search Engine (ONNX + NumPy + PIL)")
 
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
@@ -186,28 +155,17 @@ async def search_image(file: UploadFile = File(...)):
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        # Prepare CV2 Image for Color Scoring
-        open_cv_query = np.array(image) 
-        open_cv_query = open_cv_query[:, :, ::-1].copy() # RGB to BGR
-        
         # 2. Generate Embedding (ONNX)
         t0 = time.time()
         query_vector = embedder.encode(image)
-        # query_vector is (384,)
         t_emb = time.time() - t0
         
-        # 3. NumPy Search (Dot Product = Cosine Sim if Normalized)
+        # 3. NumPy Search
         t1 = time.time()
-        
-        # Dot product
-        # (N, D) @ (D,) -> (N,)
         scores = np.dot(image_vectors, query_vector)
         
-        # Get Top K candidates (e.g., top 100 for re-ranking)
-        # We want DESCENDING order
         top_k = min(100, len(scores))
         top_indices = np.argpartition(scores, -top_k)[-top_k:]
-        # Sort the top indices by score descending
         top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
         
         t_search = time.time() - t1
@@ -223,13 +181,12 @@ async def search_image(file: UploadFile = File(...)):
             motif_score = float(scores[idx])
             target_path = image_paths[idx]
             
-            # Color Score
-            color_score = calc_color_score(open_cv_query, target_path, is_query=True)
+            # Color Score (PIL)
+            color_score = calc_color_score_pil(image, target_path, is_query=True)
             
             # Weighted Final Score
             final_score = (motif_score * 0.5) + (color_score * 0.5)
             
-            # Filter out 0 score results early
             if final_score > 0:
                 candidates.append({
                     "path": target_path,
@@ -238,7 +195,6 @@ async def search_image(file: UploadFile = File(...)):
                     "final_score": final_score
                 })
             
-        # Sort by Final Score
         candidates.sort(key=lambda x: x['final_score'], reverse=True)
             
         # 5. Format Results
@@ -268,12 +224,10 @@ async def search_image(file: UploadFile = File(...)):
         print(f"Search Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# explicitly serve index.html for root to avoid 404s
 @app.get("/")
 async def read_index():
     return FileResponse('static/index.html')
 
-# Serve Static Files (Frontend)
 if not os.path.exists("static"):
     os.makedirs("static")
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

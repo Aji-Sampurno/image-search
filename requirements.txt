@@ -1,6 +1,6 @@
 onnxruntime
 numpy
-opencv-python-headless
+
 pillow
 requests
 fastapi
