@@ -1,0 +1,9 @@
+.venv
+.git
+static/images
+__pycache__
+*.bak
+batik_index.pkl.bak
+*.pyc
+.DS_Store
+ngrok.log
