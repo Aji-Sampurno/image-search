@@ -95,9 +95,17 @@ class ONNXEmbedder:
         # (Batch, 3, 518, 518) - (1,3,1,1) / (1,3,1,1)
         batch_tensor = (batch_tensor - self.mean) / self.std
         
-        # Run Inference
-        outputs = self.session.run(None, {self.input_name: batch_tensor})
-        features = outputs[0] # (Batch, 384)
+        # Run Inference (Sequential for Fixed Batch Size Model)
+        features_list = []
+        for i in range(len(batch_tensor)):
+            # Expand dims to (1, 3, 518, 518)
+            input_tensor = batch_tensor[i:i+1] 
+            
+            outputs = self.session.run(None, {self.input_name: input_tensor})
+            features_list.append(outputs[0]) # (1, 384)
+            
+        # Stack results -> (7, 384)
+        features = np.vstack(features_list)
             
         # Average Pooling
         avg_feature = np.mean(features, axis=0) # (384,)
