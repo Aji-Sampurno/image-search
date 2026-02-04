@@ -100,6 +100,7 @@ class ONNXEmbedder:
         for i in range(len(batch_tensor)):
             # Expand dims to (1, 3, 518, 518)
             input_tensor = batch_tensor[i:i+1] 
+            print(f"Running ONNX inference {i+1}/{len(batch_tensor)} with shape {input_tensor.shape}")
             
             outputs = self.session.run(None, {self.input_name: input_tensor})
             features_list.append(outputs[0]) # (1, 384)
