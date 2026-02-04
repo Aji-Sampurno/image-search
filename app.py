@@ -12,10 +12,10 @@ import os
 import time
 import io
 from PIL import Image
-# Import Embedder (Torch) BEFORE FAISS to prevent OpenMP Segfault on Mac
-from embedder import CNNEmbedder
-import faiss
-import cv2 # Import OpenCV - Must be AFTER Torch/Embedder
+# Replace Torch Embedder with ONNX Embedder
+from onnx_embedder import ONNXEmbedder
+# Remove faiss import
+import cv2 
 
 # --- SIFT Helper ---
 def get_sift_score(query_img_cv, target_path):
@@ -109,17 +109,16 @@ def calc_color_score(img1_cv, img2_path, is_query=False):
 # -------------------
 
 # Configuration
-# Configuration
-# Use Absolute Path based on this file's location to avoid CWD issues in Passenger
+# Use Absolute Path based on this file's location to avoid CWD issues
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
 VECTORS_FILE = os.path.join(DATA_DIR, "batik_vectors.npy")
 PATHS_FILE = os.path.join(DATA_DIR, "batik_paths.pkl")
-INDEX_FILE = os.path.join(DATA_DIR, "batik.faiss")
+# Removed CONFIG/INDEX_FILE since we use pure numpy now
 IMAGES_DIR = os.path.join(BASE_DIR, "static/images")
 
-app = FastAPI(title="Batik Search Engine (CNN + FAISS)")
+app = FastAPI(title="Batik Search Engine (ONNX + NumPy)")
 
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
@@ -132,35 +131,35 @@ app.add_middleware(
 
 # Global Resources
 embedder = None
-index = None
+image_vectors = None # Numpy Array
 image_paths = []
 is_ready = False
 
 @app.on_event("startup")
 async def startup_event():
-    global embedder, index, image_paths, is_ready
+    global embedder, image_vectors, image_paths, is_ready
     print("Startup: Initializing resources...")
     
     try:
-        # 1. Load Embedder
-        embedder = CNNEmbedder()
-        print("Embedder loaded.")
+        # 1. Load ONNX Embedder
+        embedder = ONNXEmbedder()
+        print("ONNX Embedder loaded.")
         
-        # 2. Check for Index
-        if os.path.exists(INDEX_FILE) and os.path.exists(PATHS_FILE):
-            print(f"Loading index from {INDEX_FILE}...")
-            index = faiss.read_index(INDEX_FILE)
+        # 2. Check for Vectors & Paths
+        if os.path.exists(VECTORS_FILE) and os.path.exists(PATHS_FILE):
+            print(f"Loading vectors from {VECTORS_FILE}...")
+            image_vectors = np.load(VECTORS_FILE)
             
             with open(PATHS_FILE, "rb") as f:
                 image_paths = pickle.load(f)
                 
-            if index.ntotal != len(image_paths):
-                print(f"Warning: Index size ({index.ntotal}) does not match paths count ({len(image_paths)}).")
+            if len(image_vectors) != len(image_paths):
+                print(f"Warning: Vector count ({len(image_vectors)}) does not match paths count ({len(image_paths)}).")
             
             is_ready = True
-            print(f"System READY. Index size: {index.ntotal}")
+            print(f"System READY. Database size: {len(image_vectors)}")
         else:
-            print("Warning: Index not found. Please run 'python3 build_index.py' to generate.")
+            print("Warning: Vectors/Paths not found. Please ensure data is indexed.")
             is_ready = False
             
     except Exception as e:
@@ -169,16 +168,16 @@ async def startup_event():
 @app.get("/health")
 def health_check():
     return {
-        "status": "ok" if is_ready else "not_ready_index_missing",
-        "index_size": index.ntotal if index else 0
+        "status": "ok" if is_ready else "not_ready_data_missing",
+        "index_size": len(image_vectors) if image_vectors is not None else 0
     }
 
 @app.post("/api/search")
 async def search_image(file: UploadFile = File(...)):
-    global is_ready, index, image_paths
+    global is_ready, image_vectors, image_paths
     
-    if not is_ready or index is None:
-        raise HTTPException(status_code=503, detail="Index not ready. Run build_index.py first.")
+    if not is_ready or image_vectors is None:
+        raise HTTPException(status_code=503, detail="Index not ready.")
     
     try:
         start_time = time.time()
@@ -191,42 +190,43 @@ async def search_image(file: UploadFile = File(...)):
         open_cv_query = np.array(image) 
         open_cv_query = open_cv_query[:, :, ::-1].copy() # RGB to BGR
         
-        # 2. Generate Embedding
+        # 2. Generate Embedding (ONNX)
         t0 = time.time()
         query_vector = embedder.encode(image)
-        # FAISS expects (1, D)
-        query_vector = query_vector.reshape(1, -1)
+        # query_vector is (384,)
         t_emb = time.time() - t0
         
-        # 3. FAISS Search (Retrieval Stage)
+        # 3. NumPy Search (Dot Product = Cosine Sim if Normalized)
         t1 = time.time()
-        k_retrieval = index.ntotal # Compare against ALL images (Maximum Recall, slower at scale)
-        distances, indices = index.search(query_vector, k_retrieval)
-        t_faiss = time.time() - t1
+        
+        # Dot product
+        # (N, D) @ (D,) -> (N,)
+        scores = np.dot(image_vectors, query_vector)
+        
+        # Get Top K candidates (e.g., top 100 for re-ranking)
+        # We want DESCENDING order
+        top_k = min(100, len(scores))
+        top_indices = np.argpartition(scores, -top_k)[-top_k:]
+        # Sort the top indices by score descending
+        top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+        
+        t_search = time.time() - t1
         
         # 4. Hybrid Re-Ranking (Motif + Color)
         candidates = []
         
-        print(f"Top 5 Raw FAISS Scores: {distances[0][:5]}")
+        print(f"Top 5 Raw Scores: {scores[top_indices][:5]}")
 
-        for i, idx in enumerate(indices[0]):
-            if idx == -1: continue
+        for i, idx in enumerate(top_indices):
             if idx >= len(image_paths): continue
             
-            # FAISS Score (Cosine Similarity approx)
-            motif_score = float(distances[0][i])
-            
+            motif_score = float(scores[idx])
             target_path = image_paths[idx]
-            
-            # STRICT PENALTY REMOVED
-            # We just use the weighted average. weak color matches will just have lower scores,
-            # but they won't be eliminated entirely.
             
             # Color Score
             color_score = calc_color_score(open_cv_query, target_path, is_query=True)
             
             # Weighted Final Score
-            # Weight: 50% Motif, 50% Color - Balanced Approach
             final_score = (motif_score * 0.5) + (color_score * 0.5)
             
             # Filter out 0 score results early
@@ -244,7 +244,6 @@ async def search_image(file: UploadFile = File(...)):
         # 5. Format Results
         results = []
         for cand in candidates:
-            # Double check (though we filtered above)
             if cand['final_score'] <= 0: continue
             
             path = cand['path']
@@ -254,14 +253,14 @@ async def search_image(file: UploadFile = File(...)):
             results.append({
                 "filename": os.path.basename(path),
                 "score": cand['final_score'] * 100,
-                "motif_score": cand['motif_score'] * 100, # Debug info
-                "color_score": cand['color_score'] * 100, # Debug info
+                "motif_score": cand['motif_score'] * 100, 
+                "color_score": cand['color_score'] * 100, 
                 "url": url,
                 "matches": 0 
             })
             
         total_time = time.time() - start_time
-        print(f"Search: {len(results)} results in {total_time:.3f}s (Emb: {t_emb:.3f}s, FAISS: {t_faiss:.3f}s)")
+        print(f"Search: {len(results)} results in {total_time:.3f}s (Emb: {t_emb:.3f}s, Search: {t_search:.3f}s)")
         
         return JSONResponse(content={"results": results})
         
