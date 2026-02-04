@@ -4,7 +4,7 @@ from PIL import Image, ImageOps
 import os
 
 class ONNXEmbedder:
-    def __init__(self, model_path="dinov2.onnx"):
+    def __init__(self, model_path="dinov2_quant.onnx"):
         print(f"Loading ONNX Model from {model_path}...")
         
         # Initialize ONNX Runtime
